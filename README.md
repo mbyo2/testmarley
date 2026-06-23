@@ -2,13 +2,17 @@ Marley Health Deployment (Frappe v16)
 
 This repository contains the files needed to automate a complete, production-ready installation of Frappe v16, ERPNext, and the Marley Health module. It is designed specifically for Ubuntu servers and handles all system dependencies smoothly.
 
+Out-of-the-Box IP Access (No Domain Required)
+
+This setup is configured to work immediately on any server using just the public IP address. You do not need a registered domain name (URL) to install, test, or use the system.
+
 Prerequisites
 
 OS: A fresh Ubuntu 22.04 LTS or 24.04 LTS server.
 
 Resources: Minimum 2 CPU Cores, 4GB RAM (the script automatically creates a 2GB swap file to assist smaller servers).
 
-Access: Root access (or a user with full sudo privileges). 
+Access: Root access (or a user with full sudo privileges).
 
 How to Install
 
@@ -19,12 +23,10 @@ cd testmarley
 
 
 Configure your settings:
-Open config.env using nano or your preferred text editor and update the default passwords and your domain name:
+Open config.env using nano or your preferred text editor. You can update the default passwords. You can leave SITE_NAME=marley.local exactly as it is—the script automatically sets it as the default site so your IP address routes to it correctly.
 
 nano config.env
 
-
-Note: If you do not have a live domain name yet, you can leave SITE_NAME=marley.local and access the server using your server's Public IP address.
 
 Make the script executable:
 
@@ -42,14 +44,21 @@ Post-Installation
 
 Once the script finishes, it will print out your Administrator login details.
 
-Log in to your instance via your browser.
+Open your web browser and type in your Server's Public IP Address (e.g., http://192.168.1.50 or http://104.25.x.x).
+
+Log in using the Administrator credentials.
 
 Search for the Healthcare Settings and Medical Departments to begin tailoring the system for your Diagnostic Center and Dental Hospital.
 
-Setting up SSL (HTTPS)
+Adding a Domain and SSL (Later)
 
-If you set your SITE_NAME to a real domain (e.g., health.mydomain.com) and have pointed your DNS A-records to this server's IP address, you can generate a free SSL certificate by running:
+When you are ready to use a real URL (e.g., health.mydomain.com), you can easily add it later:
+
+Point your domain's DNS A-record to your server's IP address.
+
+Run these commands to add the domain and secure it with a free SSL certificate:
 
 su - frappe
 cd frappe-bench
-sudo bench setup lets-encrypt <your-site-name>
+bench setup add-domain <your-new-domain.com> --site marley.local
+sudo bench setup lets-encrypt marley.local --custom-domain <your-new-domain.com>
