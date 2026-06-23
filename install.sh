@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Marley Health (Frappe v16) Automated Installer for Ubuntu 22.04 / 24.04
+# Marley Health (Frappe v16) Automated Installer for Ubuntu 22.04 / 24.04 / 26.04
 # ==============================================================================
 set -e
 
@@ -49,7 +49,7 @@ echo -e "${BLUE}➡️ Updating system packages...${NC}"
 apt-get update -q && apt-get upgrade -yq
 
 echo -e "${BLUE}➡️ Installing system prerequisites (Git, Curl, Wget, GCC, etc)...${NC}"
-apt-get install -yq curl git wget xvfb libfontconfig cron build-essential gcc software-properties-common pkg-config
+apt-get install -yq curl git wget xvfb libfontconfig cron build-essential gcc software-properties-common pkg-config python-is-python3 libffi-dev libssl-dev
 apt-get install -yq mariadb-server mariadb-client libmariadb-dev redis-server
 apt-get install -yq supervisor nginx certbot python3-certbot-nginx
 apt-get install -yq python3-dev python3-pip python3-venv python3-setuptools pipx
@@ -82,8 +82,8 @@ npm install -g yarn
 # 7. wkhtmltopdf (For PDF Generation)
 echo -e "${BLUE}➡️ Installing wkhtmltopdf...${NC}"
 wget -q https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb
-apt-get install -yq ./wkhtmltox_0.12.6.1-2.jammy_amd64.deb || true
-rm wkhtmltox_0.12.6.1-2.jammy_amd64.deb
+apt-get install -yq ./wkhtmltox_0.12.6.1-2.jammy_amd64.deb || apt-get install -yq wkhtmltopdf
+rm -f wkhtmltox_0.12.6.1-2.jammy_amd64.deb
 
 # 8. User Setup
 echo -e "${BLUE}➡️ Setting up Frappe system user...${NC}"
