@@ -49,7 +49,7 @@ echo -e "${BLUE}➡️ Updating system packages...${NC}"
 apt-get update -q && apt-get upgrade -yq
 
 echo -e "${BLUE}➡️ Installing system prerequisites (Git, Curl, Wget, GCC, etc)...${NC}"
-apt-get install -yq curl git wget xvfb libfontconfig cron build-essential gcc software-properties-common
+apt-get install -yq curl git wget xvfb libfontconfig cron build-essential gcc software-properties-common pkg-config
 apt-get install -yq mariadb-server mariadb-client libmariadb-dev redis-server
 apt-get install -yq supervisor nginx certbot python3-certbot-nginx
 apt-get install -yq python3-dev python3-pip python3-venv python3-setuptools pipx
