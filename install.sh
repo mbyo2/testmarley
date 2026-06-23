@@ -52,7 +52,7 @@ echo -e "${BLUE}➡️ Installing system prerequisites (Git, Curl, Wget, GCC, et
 apt-get install -yq curl git wget xvfb libfontconfig cron build-essential gcc software-properties-common
 apt-get install -yq mariadb-server mariadb-client libmariadb-dev redis-server
 apt-get install -yq supervisor nginx certbot python3-certbot-nginx
-apt-get install -yq python3-dev python3-pip python3-venv python3-setuptools
+apt-get install -yq python3-dev python3-pip python3-venv python3-setuptools pipx
 
 # 5. Database Configuration (MariaDB)
 echo -e "${BLUE}➡️ Configuring MariaDB for Frappe...${NC}"
@@ -96,7 +96,11 @@ fi
 
 # 9. Frappe Bench Installation
 echo -e "${BLUE}➡️ Installing Frappe Bench CLI...${NC}"
-pip3 install frappe-bench --break-system-packages || pip3 install frappe-bench
+su - $FRAPPE_USER -c "pipx ensurepath"
+su - $FRAPPE_USER -c "pipx install frappe-bench"
+
+# Symlink bench globally to avoid PATH issues in the script
+ln -sf /home/$FRAPPE_USER/.local/bin/bench /usr/local/bin/bench
 
 echo -e "${BLUE}➡️ Initializing Frappe Bench Environment (Branch: ${FRAPPE_BRANCH})...${NC}"
 su - $FRAPPE_USER -c "bench init frappe-bench --frappe-branch ${FRAPPE_BRANCH}"
