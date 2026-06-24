@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Marley Health (Frappe v16) Automated Installer for Ubuntu 22.04 / 24.04 / 26.04
+# Marley Health Dockerized Installer (Frappe v16 + ERPNext)
 # ==============================================================================
 set -e
 
@@ -11,7 +11,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}======================================================================${NC}"
-echo -e "${GREEN}  Starting Automated Setup for Frappe v16 + ERPNext + Marley Health  ${NC}"
+echo -e "${GREEN}  Starting Docker Setup for Frappe v16 + ERPNext + Marley Health  ${NC}"
 echo -e "${BLUE}======================================================================${NC}"
 
 # 1. Pre-flight Checks
@@ -29,13 +29,10 @@ fi
 # Load Configuration
 export $(grep -v '^#' "$DIR/config.env" | xargs)
 
-# 2. Prevent UI prompts during package installation
-export DEBIAN_FRONTEND=noninteractive
-
-# 3. Swap Check (Prevents Out-Of-Memory crashes during yarn build)
+# 2. Swap Check (Docker builds still require RAM to compile JS assets)
 SWAP_MEM=$(free -m | awk '/^Swap:/{print $2}')
 if [ "$SWAP_MEM" -eq 0 ]; then
-    echo -e "${BLUE}➡️ No swap memory detected. Creating 4GB swap file to prevent build crashes...${NC}"
+    echo -e "${BLUE}➡️ No swap memory detected. Creating 4GB swap file...${NC}"
     fallocate -l 4G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile
@@ -43,104 +40,223 @@ if [ "$SWAP_MEM" -eq 0 ]; then
     echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 
-# 4. System Update & Dependencies
-echo -e "${BLUE}➡️ Updating system packages...${NC}"
-apt-get update -q && apt-get upgrade -yq
+# 3. Clean up legacy services (Frees up ports 80, 443, 3306 for Docker)
+echo -e "${BLUE}➡️ Stopping local services (NGINX, MariaDB, Redis) if they exist...${NC}"
+systemctl stop nginx mariadb redis-server 2>/dev/null || true
+systemctl disable nginx mariadb redis-server 2>/dev/null || true
 
-echo -e "${BLUE}➡️ Installing system prerequisites (Git, Curl, Wget, GCC, etc)...${NC}"
-apt-get install -yq curl git wget xvfb libfontconfig cron build-essential gcc software-properties-common pkg-config python-is-python3 libffi-dev libssl-dev
-apt-get install -yq mariadb-server mariadb-client libmariadb-dev redis-server
-apt-get install -yq supervisor nginx certbot python3-certbot-nginx
-apt-get install -yq python3-dev python3-pip python3-venv python3-setuptools pipx
+# 4. Install Docker & Docker Compose
+if ! command -v docker &> /dev/null; then
+    echo -e "${BLUE}➡️ Installing Docker Engine...${NC}"
+    curl -fsSL https://get.docker.com -o get-docker.sh
+    sh get-docker.sh
+    rm get-docker.sh
+fi
+apt-get update -q && apt-get install -yq docker-compose-plugin
 
-# 5. Database Configuration (MariaDB)
-echo -e "${BLUE}➡️ Configuring MariaDB for Frappe...${NC}"
-cat > /etc/mysql/mariadb.conf.d/frappe.cnf <<EOF
-[mysqld]
-character-set-client-handshake = FALSE
-character-set-server = utf8mb4
-collation-server = utf8mb4_unicode_ci
+# 5. Setup Docker Project Directory
+PROJECT_DIR="/opt/marley-health"
+echo -e "${BLUE}➡️ Setting up Docker workspace at ${PROJECT_DIR}...${NC}"
+mkdir -p $PROJECT_DIR
+cd $PROJECT_DIR
 
-[mysql]
-default-character-set = utf8mb4
+# Copy config variables for Docker Compose to use natively
+cp "$DIR/config.env" .env
+
+# 6. Pull Official Base Image
+echo -e "${BLUE}➡️ Pulling official frappe/erpnext:version-16 image...${NC}"
+docker pull frappe/erpnext:version-16
+
+# 7. Create Custom Dockerfile for Marley Health
+echo -e "${BLUE}➡️ Generating Dockerfile to inject Marley Health...${NC}"
+cat > Dockerfile <<EOF
+FROM frappe/erpnext:version-16
+
+# Switch to root to install Node & Git (needed to fetch and compile Marley)
+USER root
+RUN apt-get update && \\
+    apt-get install -y git curl && \\
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \\
+    apt-get install -y nodejs && \\
+    npm install -g yarn && \\
+    rm -rf /var/lib/apt/lists/*
+
+# Switch back to the unprivileged frappe user
+USER frappe
+
+# Download Marley and compile the frontend assets directly into the image
+RUN bench get-app https://github.com/earthians/marley.git && \\
+    bench build
 EOF
 
-systemctl restart mariadb
-systemctl enable mariadb
+# 8. Create Docker Compose Configuration
+echo -e "${BLUE}➡️ Generating docker-compose.yml...${NC}"
+cat > docker-compose.yml <<EOF
+services:
+  backend:
+    build: .
+    restart: on-failure
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    environment:
+      - DB_HOST=db
+      - DB_PORT=3306
+      - REDIS_CACHE=redis-cache:6379
+      - REDIS_QUEUE=redis-queue:6379
+      - REDIS_SOCKETIO=redis-socketio:6379
 
-echo -e "${BLUE}➡️ Setting MariaDB Root Password...${NC}"
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MARIADB_ROOT_PASS}';" || true
-mysql -u root -p"${MARIADB_ROOT_PASS}" -e "FLUSH PRIVILEGES;" || true
+  configurator:
+    build: .
+    restart: "no"
+    entrypoint: [ "bash", "-c" ]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host db;
+        bench set-config -g redis_cache "redis://redis-cache:6379";
+        bench set-config -g redis_queue "redis://redis-queue:6379";
+        bench set-config -g redis_socketio "redis://redis-socketio:6379";
+        bench set-config -g root_login root;
+        bench set-config -g root_password "\$\${MARIADB_ROOT_PASS}";
+    environment:
+      - MARIADB_ROOT_PASS=\${MARIADB_ROOT_PASS}
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
 
-# 6. Node.js & Yarn
-echo -e "${BLUE}➡️ Installing Node.js (v20 LTS), Yarn & Node-Gyp...${NC}"
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt-get install -yq nodejs
-npm install -g yarn node-gyp
+  frontend:
+    build: .
+    restart: on-failure
+    command: [ "nginx-entrypoint.sh" ]
+    environment:
+      - BACKEND=backend:8000
+      - FRAPPE_SITE_NAME_HEADER=\$\$host
+      - SOCKETIO=websocket:9000
+      - UPSTREAM_REAL_IP_ADDRESS=127.0.0.1
+      - UPSTREAM_REAL_IP_HEADER=X-Forwarded-For
+      - UPSTREAM_REAL_IP_RECURSIVE=off
+    ports:
+      - "80:8080"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
 
-# 7. wkhtmltopdf (For PDF Generation)
-echo -e "${BLUE}➡️ Installing wkhtmltopdf...${NC}"
-wget -q https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb
-apt-get install -yq ./wkhtmltox_0.12.6.1-2.jammy_amd64.deb || apt-get install -yq wkhtmltopdf
-rm -f wkhtmltox_0.12.6.1-2.jammy_amd64.deb
+  websocket:
+    build: .
+    restart: on-failure
+    command: [ "node", "/home/frappe/frappe-bench/apps/frappe/socketio.js" ]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
 
-# 8. User Setup
-echo -e "${BLUE}➡️ Setting up Frappe system user...${NC}"
-if ! id "$FRAPPE_USER" &>/dev/null; then
-    useradd -m -s /bin/bash $FRAPPE_USER
-    usermod -aG sudo $FRAPPE_USER
-    # Allow frappe user to run sudo without password for production setup
-    echo "$FRAPPE_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$FRAPPE_USER
+  db:
+    image: mariadb:10.6
+    restart: on-failure
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+    environment:
+      - MYSQL_ROOT_PASSWORD=\${MARIADB_ROOT_PASS}
+    volumes:
+      - db-data:/var/lib/mysql
+
+  redis-cache:
+    image: redis:7-alpine
+    restart: on-failure
+  redis-queue:
+    image: redis:7-alpine
+    restart: on-failure
+  redis-socketio:
+    image: redis:7-alpine
+    restart: on-failure
+
+  queue-default:
+    build: .
+    restart: on-failure
+    command: [ "bench", "worker", "--queue", "default" ]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  queue-short:
+    build: .
+    restart: on-failure
+    command: [ "bench", "worker", "--queue", "short" ]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  queue-long:
+    build: .
+    restart: on-failure
+    command: [ "bench", "worker", "--queue", "long" ]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  scheduler:
+    build: .
+    restart: on-failure
+    command: [ "bench", "schedule" ]
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+volumes:
+  db-data:
+  sites:
+  logs:
+EOF
+
+# 9. Build and Launch
+echo -e "${BLUE}➡️ Building Custom Image (Injecting Marley into ERPNext)...${NC}"
+docker compose build
+
+echo -e "${BLUE}➡️ Starting Database and Redis...${NC}"
+docker compose up -d db redis-cache redis-queue redis-socketio
+
+echo -e "${BLUE}➡️ Waiting 15 seconds for Database to initialize...${NC}"
+sleep 15
+
+echo -e "${BLUE}➡️ Configuring Bench Environment inside Docker...${NC}"
+docker compose run --rm configurator
+
+echo -e "${BLUE}➡️ Starting Frappe Web & Worker Containers...${NC}"
+docker compose up -d
+
+# 10. Site Initialization
+echo -e "${BLUE}➡️ Creating Site: ${SITE_NAME}...${NC}"
+# Use grep to check if the site folder already exists inside the container's volume
+if ! docker compose exec backend ls -1 sites | grep -q "^${SITE_NAME}$"; then
+    docker compose exec backend bench new-site ${SITE_NAME} \
+        --mariadb-root-password "${MARIADB_ROOT_PASS}" \
+        --admin-password "${ADMIN_PASS}"
+        
+    echo -e "${BLUE}➡️ Installing ERPNext to site...${NC}"
+    docker compose exec backend bench --site ${SITE_NAME} install-app erpnext
+
+    echo -e "${BLUE}➡️ Installing Marley Health to site...${NC}"
+    docker compose exec backend bench --site ${SITE_NAME} install-app marley
+    
+    echo -e "${BLUE}➡️ Setting default site routing...${NC}"
+    docker compose exec backend bench use ${SITE_NAME}
+else
+    echo -e "${BLUE}➡️ Site ${SITE_NAME} already exists in volumes. Skipping site creation.${NC}"
 fi
 
-# 9. Frappe Bench Installation
-echo -e "${BLUE}➡️ Installing Frappe Bench CLI...${NC}"
-su - $FRAPPE_USER -c "pipx ensurepath"
-su - $FRAPPE_USER -c "pipx install frappe-bench"
-
-# Symlink bench globally to avoid PATH issues in the script
-ln -sf /home/$FRAPPE_USER/.local/bin/bench /usr/local/bin/bench
-
-# Configure Yarn to avoid network timeouts during heavy downloads
-su - $FRAPPE_USER -c "yarn config set network-timeout 600000 -g"
-
-echo -e "${BLUE}➡️ Initializing Frappe Bench Environment (Branch: ${FRAPPE_BRANCH})...${NC}"
-su - $FRAPPE_USER -c "bench init frappe-bench --frappe-branch ${FRAPPE_BRANCH}"
-
-# 10. Fetching Apps
-echo -e "${BLUE}➡️ Fetching ERPNext...${NC}"
-su - $FRAPPE_USER -c "cd frappe-bench && bench get-app --branch ${FRAPPE_BRANCH} erpnext"
-
-echo -e "${BLUE}➡️ Fetching Marley Health...${NC}"
-su - $FRAPPE_USER -c "cd frappe-bench && bench get-app https://github.com/earthians/marley.git"
-
-# 11. Creating the Site
-echo -e "${BLUE}➡️ Creating Site: ${SITE_NAME}...${NC}"
-su - $FRAPPE_USER -c "cd frappe-bench && bench new-site ${SITE_NAME} --mariadb-root-password '${MARIADB_ROOT_PASS}' --admin-password '${ADMIN_PASS}'"
-
-# 12. Installing Apps to Site
-echo -e "${BLUE}➡️ Installing ERPNext to site...${NC}"
-su - $FRAPPE_USER -c "cd frappe-bench && bench --site ${SITE_NAME} install-app erpnext"
-
-echo -e "${BLUE}➡️ Installing Marley Health to site...${NC}"
-# The app folder is dynamically checked to ensure compatibility with recent repo renames
-su - $FRAPPE_USER -c "cd frappe-bench && if [ -d apps/marley ]; then bench --site ${SITE_NAME} install-app marley; else bench --site ${SITE_NAME} install-app healthcare; fi"
-
-# 13. Production Setup
-echo -e "${BLUE}➡️ Configuring NGINX and Supervisor for Production...${NC}"
-su - $FRAPPE_USER -c "cd frappe-bench && bench use ${SITE_NAME}"
-su - $FRAPPE_USER -c "cd frappe-bench && sudo bench setup production ${FRAPPE_USER}"
-su - $FRAPPE_USER -c "cd frappe-bench && bench --site ${SITE_NAME} enable-scheduler"
-
-# Ensure services are active
-systemctl restart supervisor
-systemctl restart nginx
-
 echo -e "${BLUE}======================================================================${NC}"
-echo -e "${GREEN}✅ Installation Successfully Completed!${NC}"
+echo -e "${GREEN}✅ Docker Installation Successfully Completed!${NC}"
 echo -e "You can now access your system via a web browser."
 echo -e ""
 echo -e "🔗 ${GREEN}URL:${NC}        http://${SITE_NAME} (Or your server's Public IP)"
 echo -e "👤 ${GREEN}Username:${NC}   Administrator"
 echo -e "🔑 ${GREEN}Password:${NC}   ${ADMIN_PASS}"
+echo -e ""
+echo -e "🛠  ${BLUE}To manage your containers, use the following commands:${NC}"
+echo -e "   cd /opt/marley-health"
+echo -e "   docker compose ps         # View running services"
+echo -e "   docker compose logs -f    # View live system logs"
 echo -e "${BLUE}======================================================================${NC}"
