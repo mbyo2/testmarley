@@ -32,12 +32,11 @@ export $(grep -v '^#' "$DIR/config.env" | xargs)
 # 2. Prevent UI prompts during package installation
 export DEBIAN_FRONTEND=noninteractive
 
-# 3. Swap Check (Prevents Out-Of-Memory crashes during yarn build on small servers)
-TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
+# 3. Swap Check (Prevents Out-Of-Memory crashes during yarn build)
 SWAP_MEM=$(free -m | awk '/^Swap:/{print $2}')
-if [ "$TOTAL_MEM" -lt 3000 ] && [ "$SWAP_MEM" -eq 0 ]; then
-    echo -e "${BLUE}➡️ Memory is below 3GB. Creating 2GB swap file to prevent build crashes...${NC}"
-    fallocate -l 2G /swapfile
+if [ "$SWAP_MEM" -eq 0 ]; then
+    echo -e "${BLUE}➡️ No swap memory detected. Creating 4GB swap file to prevent build crashes...${NC}"
+    fallocate -l 4G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile
     swapon /swapfile
@@ -74,10 +73,10 @@ mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${MARIADB_ROOT_PASS}';" |
 mysql -u root -p"${MARIADB_ROOT_PASS}" -e "FLUSH PRIVILEGES;" || true
 
 # 6. Node.js & Yarn
-echo -e "${BLUE}➡️ Installing Node.js (v20 LTS) & Yarn...${NC}"
+echo -e "${BLUE}➡️ Installing Node.js (v20 LTS), Yarn & Node-Gyp...${NC}"
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt-get install -yq nodejs
-npm install -g yarn
+npm install -g yarn node-gyp
 
 # 7. wkhtmltopdf (For PDF Generation)
 echo -e "${BLUE}➡️ Installing wkhtmltopdf...${NC}"
@@ -101,6 +100,9 @@ su - $FRAPPE_USER -c "pipx install frappe-bench"
 
 # Symlink bench globally to avoid PATH issues in the script
 ln -sf /home/$FRAPPE_USER/.local/bin/bench /usr/local/bin/bench
+
+# Configure Yarn to avoid network timeouts during heavy downloads
+su - $FRAPPE_USER -c "yarn config set network-timeout 600000 -g"
 
 echo -e "${BLUE}➡️ Initializing Frappe Bench Environment (Branch: ${FRAPPE_BRANCH})...${NC}"
 su - $FRAPPE_USER -c "bench init frappe-bench --frappe-branch ${FRAPPE_BRANCH}"
